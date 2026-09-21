@@ -200,13 +200,14 @@ actor OpenAgentUsageProvider: UsageProvider, LedgerRecording {
                 services += result.credential.clients.sorted().map {
                     AgentService(client: $0, provider: pool.provider, product: .plan, accountID: pool.id)
                 }
+                // A failed read still owns the account: keep the observation (with the notice) so settings
+                // rows survive; only a credential that resolves no longer retires them.
+                accounts[pool.provider, default: []].append(AccountObservation(account: ProviderAccount(pool: pool),
+                    plan: result.quota?.plan, observedAt: result.at, quotaNotice: result.quota == nil ? result.notice : nil))
             }
             guard let quota = result.quota else { continue }
             if let plan = quota.plan {
                 plans[pool.id] = plan
-            }
-            if result.isActive {
-                accounts[pool.provider, default: []].append(AccountObservation(account: ProviderAccount(pool: pool), plan: quota.plan, observedAt: result.at))
             }
             for window in quota.windows {
                 snapshots.append(.init(agentId: window.id, remainingPct: window.remaining, resetAt: window.reset,

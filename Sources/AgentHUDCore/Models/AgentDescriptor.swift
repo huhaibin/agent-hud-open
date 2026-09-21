@@ -50,6 +50,16 @@ public struct AgentDescriptor: Hashable, Codable, Sendable, Identifiable {
         return vendor == "DeepSeek"
     }
 
+    /// Synthetic Codex window: today's local token spend priced at API rates. It reorders and toggles like any
+    /// window, but carries no quota — surfaces render it from `UsageStore.codexTodayCost` instead.
+    public static let codexTodayCostID = "codex-today-cost"
+    public static let codexTodayCost = AgentDescriptor(
+        id: codexTodayCostID, vendor: "Codex", model: L10n.windowTodayCost,
+        source: L10n.sourceCodexAppServer, enabled: true, connected: false
+    )
+    /// Discovery only ever reports quota windows; the synthetic cost window is never retired by a report.
+    public var isSyntheticCostWindow: Bool { id == Self.codexTodayCostID }
+
     /// Returns a copy with the given fields replaced (the core never mutates in place).
     public func with(
         enabled: Bool? = nil,

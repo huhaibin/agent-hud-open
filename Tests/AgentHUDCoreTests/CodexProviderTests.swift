@@ -76,14 +76,18 @@ final class CodexProviderTests: XCTestCase {
         }
     }
 
-    func testForkHistoryIsDeduplicatedButInternalModelUsageIsIncluded() {
+    func testForkHistoryIsCountedOnceAtLedgerLevelAndInternalModelUsageIsIncluded() {
         var t = CodexTranscript()
         ingest(&t, type: "session_meta", payload: ["id":"child", "timestamp":"2026-09-07T09:00:00Z", "source":["subagent":["thread_spawn":["parent_thread_id":"parent"]]]])
         token(&t, input: 1000, cached: 800, output: 100, at: "2026-09-07T08:00:00Z")
         token(&t, input: 1400, cached: 1000, output: 150)
-        XCTAssertEqual(t.usage.count, 1)
+        XCTAssertEqual(t.usage.count, 2, "copied pre-fork history is counted; the ledger counts a single copy per group")
         XCTAssertEqual(t.usage.first?.input, 200)
-        XCTAssertEqual(t.usage.first?.output, 50)
+        XCTAssertEqual(t.usage.first?.output, 100)
+        XCTAssertEqual(t.usage.first?.cachedInput, 800)
+        XCTAssertEqual(t.usage.last?.input, 200)
+        XCTAssertEqual(t.usage.last?.output, 50)
+        XCTAssertEqual(t.usage.last?.cachedInput, 200)
         var guardian = CodexTranscript()
         ingest(&guardian, type: "session_meta", payload: ["id":"review", "source":["subagent":["other":"guardian"]]])
         token(&guardian, input: 10000, cached: 0, output: 1000)
@@ -233,6 +237,72 @@ final class CodexProviderTests: XCTestCase {
         _ = await restored.index(since: .distantPast)
         let moved = try await reopened.buckets(since: .distantPast)
         XCTAssertEqual(moved.map(\.tokensIn), [300], "the remaining copy takes over when the original is gone")
+    }
+
+    func testForkedRolloutKeepsPreForkUsage() async throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func meta(_ at: String) -> String { line(type: "session_meta", payload: ["id":"forked", "timestamp":at, "source":"cli"], at: at) }
+        func tokens(_ input: Int, _ cached: Int, _ output: Int, _ at: String) -> String {
+            line(payload: ["type":"token_count", "info":["total_token_usage":["input_tokens":input, "cached_input_tokens":cached, "output_tokens":output]]], at: at)
+        }
+        let parent = dir.appendingPathComponent("rollout-parent.jsonl")
+        try ([meta("2026-09-07T09:00:00Z"), tokens(1000, 800, 100, "2026-09-07T09:00:00Z"),
+              tokens(1400, 1000, 150, "2026-09-07T09:01:00Z"), ""]).joined(separator: "\n")
+            .write(to: parent, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-120)], ofItemAtPath: parent.path)
+        let ledger = try UsageLedger(url: dir.appendingPathComponent("ledger/usage-ledger.sqlite"))
+        let store = CodexTranscriptStore(roots: [dir], ledger: ledger)
+        _ = await store.index(since: .distantPast)
+        var buckets = try await ledger.buckets(since: .distantPast)
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.tokensIn }, 400)
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.tokensOut }, 150)
+        // A fork copies the session into a newer rollout, and that newer copy wins the group.
+        let fork = dir.appendingPathComponent("rollout-fork.jsonl")
+        try ([meta("2026-09-07T09:05:00Z"), tokens(1000, 800, 100, "2026-09-07T09:00:00Z"),
+              tokens(1400, 1000, 150, "2026-09-07T09:01:00Z"), tokens(2000, 1200, 250, "2026-09-07T09:06:00Z"), ""]).joined(separator: "\n")
+            .write(to: fork, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-60)], ofItemAtPath: fork.path)
+        _ = await store.index(since: .distantPast)
+        buckets = try await ledger.buckets(since: .distantPast)
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.tokensIn }, 800, "pre-fork usage stays counted once the fork wins")
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.tokensOut }, 250)
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.cacheReadTokens }, 1200)
+        let restarted = CodexTranscriptStore(roots: [dir], ledger: ledger)
+        _ = await restarted.index(since: .distantPast)
+        buckets = try await ledger.buckets(since: .distantPast)
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.tokensIn }, 800, "a restart re-reads nothing and double-counts nothing")
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.tokensOut }, 250)
+    }
+
+    func testForkedRolloutWithCarriedOverTotalsCountsFullHistory() async throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func meta(_ at: String) -> String { line(type: "session_meta", payload: ["id":"carried", "timestamp":at, "source":"cli"], at: at) }
+        func totals(_ input: Int, _ cached: Int, _ output: Int, last: Int? = nil, _ at: String) -> String {
+            var info: [String: Any] = ["total_token_usage":["input_tokens":input, "cached_input_tokens":cached, "output_tokens":output]]
+            if let last { info["last_token_usage"] = ["input_tokens":last, "cached_input_tokens":cached, "output_tokens":output] }
+            return line(payload: ["type":"token_count", "info":info], at: at)
+        }
+        let parent = dir.appendingPathComponent("rollout-parent.jsonl")
+        try ([meta("2026-09-07T09:00:00Z"), totals(1400, 1000, 150, last: 1400, "2026-09-07T09:01:00Z"), ""]).joined(separator: "\n")
+            .write(to: parent, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-120)], ofItemAtPath: parent.path)
+        let ledger = try UsageLedger(url: dir.appendingPathComponent("ledger/usage-ledger.sqlite"))
+        let store = CodexTranscriptStore(roots: [dir], ledger: ledger)
+        _ = await store.index(since: .distantPast)
+        var buckets = try await ledger.buckets(since: .distantPast)
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.tokensIn }, 400)
+        // The fork does not repeat earlier events; its first snapshot already carries the full pre-fork totals.
+        let fork = dir.appendingPathComponent("rollout-fork.jsonl")
+        try ([meta("2026-09-07T09:05:00Z"), totals(2000, 1200, 250, last: 600, "2026-09-07T09:06:00Z"), ""]).joined(separator: "\n")
+            .write(to: fork, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-60)], ofItemAtPath: fork.path)
+        _ = await store.index(since: .distantPast)
+        buckets = try await ledger.buckets(since: .distantPast)
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.tokensIn }, 800, "the winning fork counts its carried-over base, not just its first turn")
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.tokensOut }, 250)
+        XCTAssertEqual(buckets.reduce(0) { $0 + $1.cacheReadTokens }, 1200)
     }
 
     func testRestartDoesNotReadAnUnchangedRolloutAgain() async throws {

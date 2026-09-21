@@ -26,6 +26,7 @@ The three dimensions (`TokenDimensions`) are additive and never overlap. Charts,
 - A missing reading is "—", not 0; zero is shown only when the service reported zero.
 - Tokens are never converted into quota, and an unavailable quota is never inferred from token counts. Claude Code's session share is its share of the tokens in the current 5 h window times the window's utilization; every other client shows "—".
 - One API response is counted once whatever the log layout; copies of one event from two files or two Macs merge, and distinct requests with identical counts are kept. Bar buckets are 15 min, 30 min, 1 h or 1 d on local quarter-hour, hour or calendar-day boundaries inside the exact half-open range; empty buckets keep their position and counts stay integers.
+- The menu bar item shows one entry at a time: every current-account window with a reading, plus the Codex today's-cost amount where its window is ordered, cycling every five seconds while more than one qualifies. A lone window keeps the bare percent the item has always shown; rows without a reading stay out of the rotation.
 
 ### Alert levels
 

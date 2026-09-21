@@ -19,6 +19,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     private static let menuWidth: CGFloat = 250
     private static let agentMenuFont = NSFontManager.shared.convert(.menuFont(ofSize: 13), toHaveTrait: .boldFontMask)
+    /// Seconds each entry of the menu bar rotation stays visible.
+    private static let rotateInterval: TimeInterval = 5
+    private var rotateIndex = 0
+    private var rotateTimer: Timer?
 
     init(store: UsageStore, settings: SettingsStore) {
         self.store = store
@@ -50,12 +54,47 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         guard let button = item.button else { return }
         let stops = store.isPaused || !store.isAccessAllowed ? GlowGradient.idleStops : GlowGradient.stops(levels: store.levels, light: SystemAppearance.isLight)
         button.image = StatusIconRenderer.image(stops: stops)
-        let title = store.isAccessAllowed ? (store.maxUsedPct.map { " \(TokenFormat.percent($0))" } ?? " —") : " —"
+        let entries = store.isAccessAllowed ? store.menuBarEntries : []
+        let title: String
+        if entries.count > 1 {
+            let entry = entries[rotateIndex % entries.count]
+            title = " \(entry.label) \(entry.value)"
+            startRotation()
+        } else {
+            stopRotation()
+            rotateIndex = 0
+            if let entry = entries.first {
+                title = entry.isCost ? " \(entry.label) \(entry.value)" : " \(entry.value)"
+            } else {
+                title = " —"
+            }
+        }
         button.attributedTitle = NSAttributedString(string: title, attributes: [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular),
             .baselineOffset: 0,
         ])
-        button.toolTip = AppResources.applicationName + L10n.text(" · 最高已用额度", " · highest usage")
+        button.toolTip = AppResources.applicationName + (entries.count > 1
+            ? L10n.text(" · 轮播 \(entries.count) 项", " · cycling \(entries.count) windows")
+            : entries.first?.isCost == true
+                ? L10n.text(" · 今日消耗金额", " · today's cost")
+                : L10n.text(" · 最高已用额度", " · highest usage"))
+    }
+
+    /// The rotation runs only while several entries compete for the single line.
+    private func startRotation() {
+        guard rotateTimer == nil else { return }
+        rotateTimer = Timer.scheduledTimer(withTimeInterval: Self.rotateInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.rotateIndex += 1
+                self.refreshButton()
+            }
+        }
+    }
+
+    private func stopRotation() {
+        rotateTimer?.invalidate()
+        rotateTimer = nil
     }
 
     // MARK: Menu
@@ -86,8 +125,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     header.toolTip = account.quotaNotice
                     menu.addItem(header)
                 }
-                for row in section.rows {
+                // Today's local token spend at API prices sits where its window is ordered in the group.
+                let costIndex = group.vendor == "Codex" && section.isCurrent
+                    ? store.codexTodayCostRowIndex(in: section.rows) : nil
+                for (rowIndex, row) in section.rows.enumerated() {
+                    if costIndex == rowIndex, let cost = store.codexTodayCost {
+                        menu.addItem(codexTodayCostItem(cost))
+                    }
                     menu.addItem(rowItem(row, showVendor: groups.count == 1 && group.rows.count == 1 && section.account == nil))
+                }
+                if costIndex == section.rows.count, let cost = store.codexTodayCost {
+                    menu.addItem(codexTodayCostItem(cost))
                 }
             }
         }
@@ -105,7 +153,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             item.toolTip = (L10n.text("费用估算 · ", "Est. cost · ") + store.statsRange.recentLabel + ": " + cost)
             menu.addItem(item)
         }
-        if store.rows.isEmpty && store.enabledBilling.isEmpty {
+        if groups.isEmpty && store.enabledBilling.isEmpty {
             let empty = NSMenuItem(title: L10n.text("没有启用的模型", "No agents enabled"), action: nil, keyEquivalent: "")
             empty.isEnabled = false
             empty.view = MenuRowView(title: empty.title, image: nil, font: .menuFont(ofSize: 13),
@@ -149,6 +197,23 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             titleColor: row.isCurrentAccount ? .labelColor : .secondaryLabelColor, valueColor: valueColor, minimumWidth: Self.menuWidth
         )
         item.toolTip = store.quotaForecastHint(for: row.id)
+        item.view?.toolTip = item.toolTip
+        return item
+    }
+
+    private func codexTodayCostItem(_ cost: CodexPricing.Estimate) -> NSMenuItem {
+        let amount = cost.byModel.isEmpty
+            ? L10n.text("暂无价格", "Unpriced")
+            : MoneyFormat.amount(cost.total, currency: "USD", estimated: true)
+        let item = NSMenuItem(title: "今日消耗", action: #selector(openStats), keyEquivalent: "")
+        item.target = self
+        item.view = MenuRowView(
+            title: L10n.text("今日消耗", "Today"),
+            value: amount + " · " + TokenFormat.short(cost.tokens) + " tok",
+            image: StatusIconRenderer.dot(color: .tertiaryLabelColor),
+            font: .menuFont(ofSize: 13), minimumWidth: Self.menuWidth
+        )
+        item.toolTip = cost.detailsText
         item.view?.toolTip = item.toolTip
         return item
     }

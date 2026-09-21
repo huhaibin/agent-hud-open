@@ -42,7 +42,7 @@ struct HoverPanelView: View {
                 IslandAlertInlineView(alert: alert, onOpen: onOpenAlert).id(alert.id)
                     .padding(.bottom, 4)
             }
-            if store.settings.settings.showIslandQuota, !store.rows.isEmpty {
+            if store.settings.settings.showIslandQuota, !store.rowGroups.isEmpty {
                 quotaBlock
             }
             if store.settings.settings.showIslandQuota {
@@ -98,11 +98,20 @@ struct HoverPanelView: View {
                             AccountSectionHeader(account: account, now: store.now,
                                                  notice: account.quotaNotice ?? store.report?.sourceNotices[account.account.provider])
                         }
-                        ForEach(section.rows) { row in
+                        // Today's local token spend at API prices sits where its window is ordered in the group.
+                        let costIndex = group.vendor == "Codex" && section.isCurrent
+                            ? store.codexTodayCostRowIndex(in: section.rows) : nil
+                        ForEach(Array(section.rows.enumerated()), id: \.element.id) { rowIndex, row in
+                            if costIndex == rowIndex, let cost = store.codexTodayCost {
+                                CodexTodayCostView(cost: cost)
+                            }
                             ModelUsageRow(row: row, now: store.now, showReset: store.settings.settings.showResetCountdown,
                                           showVendor: false, forecastHint: section.isCurrent ? store.quotaForecastHint(for: row.id) : nil,
                                           isLoading: store.isLoading)
                                 .opacity(section.isCurrent ? 1 : 0.55)
+                        }
+                        if costIndex == section.rows.count, let cost = store.codexTodayCost {
+                            CodexTodayCostView(cost: cost)
                         }
                         // Earned resets belong to the signed-in Codex account.
                         if section.isCurrent, section.rows.contains(where: { $0.agent.vendor == "Codex" }), let resets = store.report?.resetCredits(for: section.id) {
@@ -113,7 +122,7 @@ struct HoverPanelView: View {
                 .padding(.top, index > 0 ? 8 : 0)
                 .topDivider(index > 0 ? theme.divider : .clear)
             }
-            if store.rows.isEmpty {
+            if store.rowGroups.isEmpty {
                 Text(L10n.text("暂无额度数据", "No quota data yet"))
                     .font(.ui(12))
                     .foregroundStyle(theme.secondary)
@@ -245,6 +254,55 @@ struct AccountSectionHeader: View {
         .padding(.horizontal, IslandRowLayout.inset)
         .padding(.top, 2)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// Today's local Codex token spend at OpenAI API prices, beneath the account's quota windows.
+struct CodexTodayCostView: View {
+    let cost: CodexPricing.Estimate
+    private let theme = Theme.island
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: IslandRowLayout.spacing) {
+            Image(systemName: "dollarsign")
+                .font(.ui(12, .medium))
+                .frame(width: IslandRowLayout.markerWidth)
+            Text(L10n.text("今日消耗", "Today"))
+                .font(.ui(13, .semibold))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: IslandRowLayout.nameWidth, alignment: .leading)
+            Spacer(minLength: 8)
+            Text(TokenFormat.short(cost.tokens) + " tok")
+                .font(.tabular(12))
+                .fixedSize()
+            if cost.byModel.isEmpty {
+                Text(L10n.text("暂无价格", "Unpriced"))
+                    .font(.tabular(13, .semibold))
+                    .foregroundStyle(theme.text)
+            } else {
+                Text(MoneyFormat.amount(cost.total, currency: "USD", estimated: true))
+                    .font(.tabular(13, .semibold))
+                    .foregroundStyle(theme.text)
+                    .fixedSize()
+            }
+            Image(systemName: "info.circle")
+                .font(.ui(11))
+                .foregroundStyle(isHovered ? theme.secondary : theme.tertiary)
+        }
+        .lineLimit(1)
+        .foregroundStyle(theme.secondary)
+        .padding(.vertical, 4)
+        .padding(.horizontal, IslandRowLayout.inset)
+        .background(RoundedRectangle(cornerRadius: 6).fill(theme.text.opacity(isHovered ? 0.06 : 0)))
+        .contentShape(RoundedRectangle(cornerRadius: 6))
+        .background(IslandHoverPopover(content: CodexCostDetails(cost: cost), isHovered: $isHovered))
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(L10n.text("今日消耗估算", "Today's estimated cost"))
+        .accessibilityValue(CodexCostDetails.accessibilityText(cost))
     }
 }
 

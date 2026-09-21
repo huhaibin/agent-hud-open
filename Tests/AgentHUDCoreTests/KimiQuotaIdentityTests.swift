@@ -139,6 +139,7 @@ final class KimiQuotaIdentityTests: XCTestCase {
         XCTAssertEqual(requests.filter { $0 == "usages" }.count, 1)
     }
 
+    @MainActor
     func testTemporaryFailureRetainsActiveQuotaButUnauthorizedDoesNot() async throws {
         let input = Inputs(now: now, credentials: [credential("first-key")])
         let server = Server()
@@ -148,12 +149,25 @@ final class KimiQuotaIdentityTests: XCTestCase {
         input.advance(121)
         let offline = try await retained.fetchAccountAndLocalUsage(agents: [], historyHours: 24)
         XCTAssertEqual(offline.snapshots, good.snapshots)
+        let observation = try XCTUnwrap(offline.accounts?["Kimi"]?.first, "a failed read keeps the account observation")
+        XCTAssertNotNil(observation.quotaNotice)
+        let suite = "KimiQuotaIdentityTests.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = SettingsStore(defaults: defaults, defaultAgents: [])
+        settings.mergeDiscovered(good.discoveredAgents, activeQuotaPoolIDs: good.activeQuotaPoolIDs, accounts: good.accounts)
+        let rows = settings.agents.map(\.id)
+        settings.mergeDiscovered(offline.discoveredAgents, activeQuotaPoolIDs: offline.activeQuotaPoolIDs, accounts: offline.accounts)
+        XCTAssertEqual(settings.agents.map(\.id), rows, "a transient failure must not remove the account's rows")
         await server.setUsageStatus(401)
         input.advance(121)
         let invalid = try await retained.fetchAccountAndLocalUsage(agents: [], historyHours: 24)
         XCTAssertTrue(invalid.snapshots.isEmpty)
         XCTAssertTrue(invalid.discoveredAgents.isEmpty)
         XCTAssertEqual(invalid.activeQuotaPoolIDs?["Kimi"], [])
+        XCTAssertEqual(invalid.accounts?["Kimi"], [], "an unauthorized credential retires its rows")
+        settings.mergeDiscovered(invalid.discoveredAgents, activeQuotaPoolIDs: invalid.activeQuotaPoolIDs, accounts: invalid.accounts)
+        XCTAssertTrue(settings.agents.isEmpty)
     }
 
     func testExpiredAliasDoesNotHideValidAccountOrRetainExpiredClient() async throws {

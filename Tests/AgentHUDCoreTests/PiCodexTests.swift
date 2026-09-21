@@ -3,6 +3,16 @@ import XCTest
 @testable import AgentHUDCore
 
 final class PiCodexTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        L10n.setLanguage(.en)
+    }
+
+    override func tearDown() {
+        L10n.setLanguage(.system)
+        super.tearDown()
+    }
+
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
     private static let payload = #"{"account_id":"workspace","email":"A@Example.com","plan_type":"plus","rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":1800018000},"secondary_window":{"used_percent":30,"limit_window_seconds":604800,"reset_at":1800604800}},"additional_rate_limits":[{"metered_feature":"base_model_inference","limit_name":"gpt-reserve","rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":1800604800}}}],"rate_limit_reset_credits":{"available_count":2}}"#
 

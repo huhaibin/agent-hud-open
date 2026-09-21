@@ -111,3 +111,22 @@ final class ResetLabelTests: XCTestCase {
         XCTAssertEqual(usage.rows.first?.descriptor.vendor, "Claude")
     }
 }
+
+final class MoneyFormatTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        L10n.setLanguage(.en)
+    }
+
+    override func tearDown() {
+        L10n.setLanguage(.system)
+        super.tearDown()
+    }
+
+    func testEstimatesKeepCentsAtDollarScaleAndDigitsBelow() {
+        XCTAssertEqual(MoneyFormat.amount(Decimal(string: "77.732254")!, currency: "USD", estimated: true), "$77.73")
+        XCTAssertEqual(MoneyFormat.amount(Decimal(string: "0.012414")!, currency: "USD", estimated: true), "$0.012414")
+        XCTAssertEqual(MoneyFormat.amount(Decimal(string: "0.0000004")!, currency: "USD", estimated: true), "<$0.000001")
+        XCTAssertEqual(MoneyFormat.amount(Decimal(string: "5")!, currency: "USD"), "$5.00")
+    }
+}

@@ -218,14 +218,14 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.agents.first?.id, "codex")
         XCTAssertFalse(reloaded.agents.first { $0.id == "chatgpt" }!.enabled)
         XCTAssertTrue(reloaded.hasCompletedOnboarding)
-        XCTAssertEqual(reloaded.enabledAgents.count, 3)
+        XCTAssertEqual(reloaded.enabledAgents.count, 4)
     }
 
     func testFreshStoreUsesDefaults() {
         let store = SettingsStore(defaults: makeDefaults())
         XCTAssertEqual(store.settings, Settings())
         XCTAssertEqual(store.agents, DefaultAgents.list)
-        XCTAssertEqual(store.enabledAgents.map(\.id), ["codex"], "Claude rows are discovered from local data")
+        XCTAssertEqual(store.enabledAgents.map(\.id), ["codex", "codex-today-cost"], "Claude rows are discovered from local data")
         XCTAssertFalse(store.hasCompletedOnboarding)
     }
 
@@ -235,16 +235,20 @@ final class SettingsStoreTests: XCTestCase {
         let interleaved = [models[0], models[2], models[1], models[3], models[4], models[5]]
         defaults.set(try JSONEncoder().encode(interleaved), forKey: SettingsStore.Keys.agents)
         let store = SettingsStore(defaults: defaults)
-        XCTAssertEqual(store.agents, models, "previously interleaved rows become contiguous groups")
+        var withCost = models
+        withCost.insert(.codexTodayCost, at: withCost.firstIndex { $0.id == "codex" }! + 1)
+        XCTAssertEqual(store.agents, withCost,
+                       "previously interleaved rows become contiguous groups; the shipped cost window joins Codex")
 
         store.setAgent(id: "claude-sonnet", enabled: false)
         store.moveAgentGroup(id: "Codex", to: "Claude")
         store.moveAgent(id: "claude-sonnet", to: 1)
 
         let reloaded = SettingsStore(defaults: defaults)
-        XCTAssertEqual(reloaded.agents.map(\.id), ["codex", "claude-sonnet", "claude-opus", "chatgpt", "antigravity", "deepseek"])
-        XCTAssertEqual(reloaded.agents[1], models[1].with(enabled: false))
-        XCTAssertEqual(reloaded.enabledAgents.map(\.id), ["codex", "claude-opus", "chatgpt"])
+        XCTAssertEqual(reloaded.agents.map(\.id),
+                       ["codex", "codex-today-cost", "claude-sonnet", "claude-opus", "chatgpt", "antigravity", "deepseek"])
+        XCTAssertEqual(reloaded.agents[2], models[1].with(enabled: false))
+        XCTAssertEqual(reloaded.enabledAgents.map(\.id), ["codex", "codex-today-cost", "claude-opus", "chatgpt"])
     }
 
     func testMergeDiscoveredInsertsByVendorAndUpdatesNames() {
@@ -411,6 +415,84 @@ final class UsageStoreTests: XCTestCase {
         await store.refresh()
         store.settings.setAgent(id: "codex", enabled: false)
         XCTAssertEqual(store.levels, [.ok, .warning, .ok])
+    }
+
+    func testCodexTodayCostIsAnOrderedWindowOutsideQuotaRows() {
+        let store = makeStore()
+        let now = Date()
+        store.replace(report: UsageReport(generatedAt: now, snapshots: [], sessions: [],
+            usage: [UsageBucket(start: now, agentId: "codex-model:gpt-5.3-codex", tokensIn: 1_000_000, tokensOut: 0)]))
+        XCTAssertFalse(store.rows.contains(where: \.agent.isSyntheticCostWindow), "the cost window never becomes a quota row")
+        XCTAssertTrue(store.codexTodayCostEnabled)
+        XCTAssertNotNil(store.codexTodayCost)
+        let codexRows = store.rows.filter { $0.agent.vendor == "Codex" }
+        XCTAssertEqual(store.codexTodayCostRowIndex(in: codexRows), codexRows.count,
+                       "the demo catalog orders the cost window after the Codex quota window")
+
+        store.settings.setAgent(id: AgentDescriptor.codexTodayCostID, enabled: false)
+        XCTAssertFalse(store.codexTodayCostEnabled)
+        XCTAssertNil(store.codexTodayCostRowIndex(in: codexRows), "switching the window off hides the row")
+        XCTAssertNotNil(store.codexTodayCost, "the estimate itself is independent of the window switch")
+    }
+
+    func testCodexTodayCostRowIndexFollowsWindowOrder() {
+        let store = makeStore()
+        let now = Date()
+        let quota = AgentDescriptor(id: "codex", vendor: "Codex", model: "Desktop / CLI", source: "", enabled: true)
+        store.settings.updateAgents { _ in [quota, .codexTodayCost] }
+        store.replace(report: UsageReport(generatedAt: now, snapshots: [], sessions: [],
+            usage: [UsageBucket(start: now, agentId: "codex-model:gpt-5.3-codex", tokensIn: 1_000_000, tokensOut: 0)]))
+        XCTAssertEqual(store.codexTodayCostRowIndex(in: store.rows), 1, "ordered after the quota window")
+        store.settings.moveAgent(id: AgentDescriptor.codexTodayCostID, to: 0)
+        XCTAssertEqual(store.codexTodayCostRowIndex(in: store.rows), 0, "dragged first, the cost row leads")
+    }
+
+    func testCodexGroupSurvivesWithOnlyTheCostWindowEnabled() {
+        let store = makeStore()
+        let now = Date()
+        store.settings.updateAgents { _ in [.codexTodayCost] }
+        store.replace(report: UsageReport(generatedAt: now, snapshots: [], sessions: [],
+            usage: [UsageBucket(start: now, agentId: "codex-model:gpt-5.3-codex", tokensIn: 1_000_000, tokensOut: 0)]))
+        XCTAssertEqual(store.rowGroups.map(\.vendor), ["Codex"])
+        XCTAssertEqual(store.rowGroups.first?.rows, [])
+        XCTAssertEqual(store.accountSections([]).count, 1, "an empty group still renders one section for the cost row")
+    }
+
+    func testMenuBarEntriesCycleWindowsAndCodexCost() {
+        let store = makeStore()
+        let now = Date()
+        let kimi7d = AgentDescriptor(id: "kimi/7d", vendor: "Kimi", model: "7d · CN · PLAN · 账户 a1", source: "", enabled: true)
+        let kimi300m = AgentDescriptor(id: "kimi/300m", vendor: "Kimi", model: "300m · CN · PLAN · 账户 a1", source: "", enabled: true)
+        let codex = AgentDescriptor(id: "codex", vendor: "Codex", model: "Desktop / CLI", source: "", enabled: true)
+        store.settings.updateAgents { _ in [kimi7d, kimi300m, .codexTodayCost, codex] }
+        store.replace(report: UsageReport(generatedAt: now, snapshots: [
+            UsageSnapshot(agentId: "kimi/7d", remainingPct: 60, resetAt: now.addingTimeInterval(3600), windowDuration: 86400, updatedAt: now),
+            UsageSnapshot(agentId: "kimi/300m", remainingPct: 98, resetAt: now.addingTimeInterval(3600), windowDuration: 86400, updatedAt: now),
+        ], sessions: [], usage: [UsageBucket(start: now, agentId: "codex-model:gpt-5.3-codex", tokensIn: 1_000_000, tokensOut: 0)]))
+
+        XCTAssertEqual(store.menuBarEntries, [
+            MenuBarEntry(label: "7d", value: "40%", isCost: false),
+            MenuBarEntry(label: "300m", value: "2%", isCost: false),
+            MenuBarEntry(label: "Codex", value: "$1.75", isCost: true),
+        ], "quota rows without a reading stay out; the cost amount sits where its window is ordered")
+
+        store.settings.moveAgent(id: AgentDescriptor.codexTodayCostID, to: 0)
+        XCTAssertEqual(store.menuBarEntries.map(\.label), ["Codex", "7d", "300m"], "dragged first, the cost entry leads")
+    }
+
+    func testMenuBarEntriesOmitCostWithoutPricedSpend() {
+        let store = makeStore()
+        let now = Date()
+        let codex = AgentDescriptor(id: "codex", vendor: "Codex", model: "Desktop / CLI", source: "", enabled: true)
+        store.settings.updateAgents { _ in [codex, .codexTodayCost] }
+        let snapshot = UsageSnapshot(agentId: "codex", remainingPct: 66, resetAt: now.addingTimeInterval(3600), windowDuration: 86400, updatedAt: now)
+        store.replace(report: UsageReport(generatedAt: now, snapshots: [snapshot], sessions: []))
+        XCTAssertEqual(store.menuBarEntries, [MenuBarEntry(label: "账户额度", value: "34%", isCost: false)],
+                       "nothing ran today, so no cost entry")
+
+        store.replace(report: UsageReport(generatedAt: now, snapshots: [snapshot], sessions: [],
+            usage: [UsageBucket(start: now, agentId: "codex-model:unknown-model", tokensIn: 1000, tokensOut: 0)]))
+        XCTAssertEqual(store.menuBarEntries.map(\.isCost), [false], "unpriced models alone do not create a cost entry")
     }
 
     func testQuotaSettingsDoNotGateConsumersOrSessions() {

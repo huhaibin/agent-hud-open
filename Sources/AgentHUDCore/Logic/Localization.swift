@@ -75,12 +75,14 @@ public enum L10n {
     public static let windowSession = "window.session"
     public static let windowWeekly = "window.weekly"
     public static let windowWeeklyPrefix = "window.weekly."
+    public static let windowTodayCost = "window.today-cost"
 
     /// Full row label: "当前会话 · 5h" / "Session · 5h", "本周 · Fable" / "Weekly · Fable"; real model names pass through.
     public static func modelLabel(_ model: String) -> String {
         if model == "Desktop / CLI" || model == "CLI" { return text("账户额度", "Account quota") }
         if model == windowSession { return text("当前会话 · 5h", "Session · 5h") }
         if model == windowWeekly { return text("本周 · 全部模型", "Weekly · all models") }
+        if model == windowTodayCost { return text("今日消耗金额", "Today's cost") }
         if model.hasPrefix(windowWeeklyPrefix) {
             let family = model.dropFirst(windowWeeklyPrefix.count)
             return text("本周 · \(family)", "Weekly · \(family)")
@@ -93,6 +95,7 @@ public enum L10n {
         if model == "Desktop / CLI" || model == "CLI" { return modelLabel(model) }
         if model == windowSession { return text("当前会话", "Session") }
         if model == windowWeekly { return text("本周", "Weekly") }
+        if model == windowTodayCost { return text("今日消耗", "Today") }
         if model.hasPrefix(windowWeeklyPrefix) {
             let family = model.dropFirst(windowWeeklyPrefix.count)
             return text("本周 \(family)", "Weekly \(family)")

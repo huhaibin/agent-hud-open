@@ -43,6 +43,16 @@ public final class SettingsStore {
             agents = defaultAgents.groupedAgentOrder
         }
         hasCompletedOnboarding = defaults.bool(forKey: Keys.onboarding)
+        agents = Self.withSyntheticWindows(agents)
+    }
+
+    /// Windows the app ships itself join catalogs written before they existed, behind the vendor's last row.
+    static func withSyntheticWindows(_ list: [AgentDescriptor]) -> [AgentDescriptor] {
+        guard !list.contains(where: \.isSyntheticCostWindow),
+              let anchor = list.lastIndex(where: { $0.vendor == "Codex" }) else { return list }
+        var list = list
+        list.insert(.codexTodayCost, at: anchor + 1)
+        return list
     }
 
     public var enabledAgents: [AgentDescriptor] { agents.filter(\.enabled) }
@@ -132,7 +142,8 @@ public final class SettingsStore {
             }
             // Unscoped rows of a provider that now identifies accounts have been taken over or no longer exist.
             list.removeAll { agent in
-                agent.account == nil && agent.billingPool == nil && accounts?[agent.vendor]?.isEmpty == false
+                !agent.isSyntheticCostWindow
+                    && agent.account == nil && agent.billingPool == nil && accounts?[agent.vendor]?.isEmpty == false
                     && !discovered.contains { $0.id == agent.id }
             }
             for found in discovered {
@@ -149,6 +160,14 @@ public final class SettingsStore {
                 }
                 let anchor = list.lastIndex { $0.vendor == found.vendor }
                 list.insert(found, at: anchor.map { $0 + 1 } ?? 0)
+            }
+            // The synthetic cost window follows the real Codex windows: it retires when a Codex account
+            // inventory leaves none behind, and rejoins behind the last Codex row when one exists without it.
+            if accounts?["Codex"] != nil, !list.contains(where: { $0.vendor == "Codex" && !$0.isSyntheticCostWindow }) {
+                list.removeAll(where: \.isSyntheticCostWindow)
+            } else if let anchor = list.lastIndex(where: { $0.vendor == "Codex" && !$0.isSyntheticCostWindow }),
+                      !list.contains(where: \.isSyntheticCostWindow) {
+                list.insert(.codexTodayCost, at: anchor + 1)
             }
             return list
         }()

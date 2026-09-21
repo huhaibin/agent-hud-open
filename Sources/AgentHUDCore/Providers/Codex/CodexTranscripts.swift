@@ -83,7 +83,9 @@ public struct CodexTranscript: Codable, Sendable {
             return
         }
         guard type == "event_msg", let kind = payload["type"] as? String else { return }
-        // Forks copy earlier history. Read its cumulative baseline but do not count it again.
+        // Forks carry the session's cumulative counters into a new rollout (and some copy earlier events verbatim).
+        // Each copy must be self-contained — LedgerCopies.counted lets only one copy per session count — so a first
+        // read counts the full cumulative totals, and copied events count their deltas like any other.
         let inherited = timestamp < (startedAt ?? .distantPast)
         if kind == "token_count" {
             guard let info = payload["info"] as? [String: Any],
@@ -91,13 +93,12 @@ public struct CodexTranscript: Codable, Sendable {
                   let input = totals["input_tokens"] as? Int,
                   let output = totals["output_tokens"] as? Int else { return }
             let cached = totals["cached_input_tokens"] as? Int ?? 0
-            let last = info["last_token_usage"] as? [String: Any]
             let reset = input < totalInput || output < totalOutput || cached < totalCached
-            let inputDelta = hasTotals && !reset ? input - totalInput : (last?["input_tokens"] as? Int ?? input)
-            let cachedDelta = hasTotals && !reset ? cached - totalCached : (last?["cached_input_tokens"] as? Int ?? cached)
-            let outputDelta = hasTotals && !reset ? output - totalOutput : (last?["output_tokens"] as? Int ?? output)
+            let inputDelta = hasTotals && !reset ? input - totalInput : input
+            let cachedDelta = hasTotals && !reset ? cached - totalCached : cached
+            let outputDelta = hasTotals && !reset ? output - totalOutput : output
             totalInput = input; totalCached = cached; totalOutput = output; hasTotals = true
-            guard !inherited, inputDelta > 0 || outputDelta > 0 else { return }
+            guard inputDelta > 0 || outputDelta > 0 else { return }
             // Cached input is already included in input_tokens; reasoning is already in output_tokens.
             let sample = Usage(timestamp: timestamp, model: model, input: max(0, inputDelta - cachedDelta), output: max(0, outputDelta),
                                cachedInput: max(0, cachedDelta))
@@ -280,7 +281,7 @@ public actor CodexTranscriptStore {
 enum CodexRollouts: TailLog {
     static let source = "codex"
     static let summaryKey = "transcript"
-    static let version = 2
+    static let version = 4
 
     static func summary(for url: URL) -> CodexTranscript { CodexTranscript() }
 

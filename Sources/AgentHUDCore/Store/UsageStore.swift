@@ -35,6 +35,14 @@ public struct AgentRow: Hashable, Sendable, Identifiable {
     }
 }
 
+/// One line of the menu bar rotation: a window's used share or the Codex today's-cost amount.
+public struct MenuBarEntry: Hashable, Sendable {
+    public let label: String
+    public let value: String
+    /// A cost entry keeps its label even when it is the only entry; a lone quota entry shows just its percent.
+    public let isCost: Bool
+}
+
 extension UsageReport {
     /// The times at which this report's activity changes with time alone: when a running turn reaches the age at which
     /// it no longer counts as current, and when a session whose source never said what its turn is doing reaches the
@@ -244,7 +252,7 @@ public final class UsageStore {
     }
 
     public var rows: [AgentRow] {
-        enabledAgents.filter { !$0.isAPIBilled }.enumerated().map { index, agent in
+        enabledAgents.filter { !$0.isAPIBilled && !$0.isSyntheticCostWindow }.enumerated().map { index, agent in
             let snapshot = report?.snapshot(for: agent.id)
             let isCurrent = report?.isCurrent(agent) ?? true
             return AgentRow(
@@ -306,6 +314,32 @@ public final class UsageStore {
 
     /// The most consumed window of a signed-in account, shown in the menu bar.
     public var maxUsedPct: Double? { rows.filter(\.isCurrentAccount).compactMap(\.usedPct).max() }
+
+    /// What the menu bar cycles through when several windows have a reading: every current-account window's
+    /// usage, plus the Codex today's-cost amount where its window is ordered. Rows without a reading stay out.
+    public var menuBarEntries: [MenuBarEntry] {
+        let order = settings.enabledAgents.map(\.id)
+        let costPosition = order.firstIndex(of: AgentDescriptor.codexTodayCostID) ?? Int.max
+        var entries: [MenuBarEntry] = []
+        var costIndex = 0
+        for row in rows {
+            let orderedBeforeCost = (order.firstIndex(of: row.id) ?? Int.max) < costPosition
+            guard row.isCurrentAccount, let used = row.usedPct else { continue }
+            let label = L10n.modelLabel(row.agent.model)
+            entries.append(MenuBarEntry(
+                label: label.components(separatedBy: " · ").first ?? label,
+                value: TokenFormat.percent(used), isCost: false
+            ))
+            if orderedBeforeCost { costIndex = entries.count }
+        }
+        if codexTodayCostEnabled, let cost = codexTodayCost, !cost.byModel.isEmpty {
+            entries.insert(MenuBarEntry(
+                label: "Codex",
+                value: MoneyFormat.amount(cost.total, currency: "USD", estimated: true), isCost: true
+            ), at: min(costIndex, entries.count))
+        }
+        return entries
+    }
 
     /// Newest first, by the last event each source reported: a prompt, a reply, a tool result or an approval request.
     /// A running session nothing has been heard from for half an hour sits below one that just answered.
@@ -451,6 +485,25 @@ public final class UsageStore {
             since: dataDate.addingTimeInterval(-7 * 86400), calendar: .current, dimensions: tokenDimensions)
     }
 
+    /// Today's Codex token spend at OpenAI API prices, for the Codex tile; nil when nothing ran today.
+    public var codexTodayCost: CodexPricing.Estimate? {
+        CodexPricing.estimate(buckets: report?.usage ?? [], since: Calendar.current.startOfDay(for: now))
+    }
+
+    /// Whether the synthetic cost window is switched on in the Codex group.
+    public var codexTodayCostEnabled: Bool {
+        settings.enabledAgents.contains(where: \.isSyntheticCostWindow)
+    }
+
+    /// Where the cost row sits among one section's quota rows: after every row the user ordered before it.
+    /// Nil when the window is off or there is nothing to show.
+    public func codexTodayCostRowIndex(in sectionRows: [AgentRow]) -> Int? {
+        guard codexTodayCostEnabled, codexTodayCost != nil else { return nil }
+        let order = settings.enabledAgents.map(\.id)
+        guard let costPosition = order.firstIndex(of: AgentDescriptor.codexTodayCostID) else { return nil }
+        return sectionRows.filter { row in order.firstIndex(of: row.id).map { $0 < costPosition } ?? true }.count
+    }
+
     public var weeklyTokenShare: [String: Double] {
         var totals: [String: Int] = [:]
         let week = DateInterval(start: dataDate.addingTimeInterval(-7 * 86400), end: dataDate)
@@ -483,11 +536,24 @@ public final class UsageStore {
             if groups[vendor] == nil { order.append(vendor) }
             groups[vendor, default: []].append(row)
         }
+        // The cost window carries no quota row; with every Codex quota window off its group still shows.
+        if codexTodayCostEnabled, codexTodayCost != nil, !order.contains("Codex") {
+            var vendorsBefore: [String] = []
+            for agent in settings.enabledAgents {
+                if agent.isSyntheticCostWindow { break }
+                guard !agent.isAPIBilled else { continue }
+                let vendor = agent.displayVendor
+                if !vendorsBefore.contains(vendor) { vendorsBefore.append(vendor) }
+            }
+            order.insert("Codex", at: min(vendorsBefore.count, order.count))
+            groups["Codex"] = []
+        }
         return order.map { ($0, groups[$0] ?? []) }
     }
 
     /// A vendor group's rows split by account, in row order. One section without an account when nothing is identified.
     public func accountSections(_ rows: [AgentRow]) -> [AccountSection] {
+        guard !rows.isEmpty else { return [AccountSection(id: "", account: nil, isCurrent: true, rows: [])] }
         var order: [String] = []
         var sections: [String: [AgentRow]] = [:]
         for row in rows {

@@ -155,15 +155,15 @@ final class ProviderAccountTests: XCTestCase {
         ])
         let first = report(account: accountA, remaining: 50, at: now, credits: nil)
         settings.mergeDiscovered(first.discoveredAgents, accounts: first.accounts)
-        XCTAssertEqual(settings.agents.map(\.id), ["claude-session", accountA.windowID("codex")])
+        XCTAssertEqual(settings.agents.map(\.id), ["claude-session", accountA.windowID("codex"), "codex-today-cost"])
         XCTAssertFalse(settings.agents[1].enabled, "the switch and position move with the window")
         var inventory = first.accounts!
         inventory["Codex"]!.append(AccountObservation(account: accountB, observedAt: now))
         settings.mergeDiscovered([descriptor(accountB)], accounts: inventory)
-        XCTAssertEqual(settings.agents.map(\.id), ["claude-session", accountA.windowID("codex"), accountB.windowID("codex")])
-        XCTAssertFalse(settings.agents[2].enabled)
+        XCTAssertEqual(settings.agents.map(\.id), ["claude-session", accountA.windowID("codex"), "codex-today-cost", accountB.windowID("codex")])
+        XCTAssertFalse(settings.agents[3].enabled)
         settings.mergeDiscovered([], accounts: ["Codex": [AccountObservation(account: accountB, observedAt: now)]])
-        XCTAssertEqual(settings.agents.map(\.id), ["claude-session", accountB.windowID("codex")], "retired accounts leave the settings")
+        XCTAssertEqual(settings.agents.map(\.id), ["claude-session", "codex-today-cost", accountB.windowID("codex")], "retired accounts leave the settings")
     }
 
     func testSwitchingAccountsIsNeitherAResetNorAnExhaustion() {

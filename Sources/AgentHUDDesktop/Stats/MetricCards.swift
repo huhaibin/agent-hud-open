@@ -37,18 +37,21 @@ private struct AgentQuotaTile: View {
                 AgentLogo(vendor: rows.first?.agent.vendor ?? vendor, size: 14)
                 Text(vendor).font(.ui(12, .semibold)).lineLimit(1)
                 Spacer(minLength: 4)
-                SelectionMenu(
-                    title: vendor + " " + L10n.text("额度窗口", "quota window"),
-                    options: rows.map { row in
-                        let account = Set(rows.compactMap(\.agent.account?.id)).count > 1 ? row.account.map { $0.displayName + " · " } : nil
-                        return SegmentOption(value: row.id, label: (account ?? "") + L10n.modelLabel(row.agent.model))
-                    },
-                    selection: Binding(get: { row?.id ?? "" }, set: { selectedRowID = $0 }),
-                    theme: theme
-                )
+                if !rows.isEmpty {
+                    SelectionMenu(
+                        title: vendor + " " + L10n.text("额度窗口", "quota window"),
+                        options: rows.map { row in
+                            let account = Set(rows.compactMap(\.agent.account?.id)).count > 1 ? row.account.map { $0.displayName + " · " } : nil
+                            return SegmentOption(value: row.id, label: (account ?? "") + L10n.modelLabel(row.agent.model))
+                        },
+                        selection: Binding(get: { row?.id ?? "" }, set: { selectedRowID = $0 }),
+                        theme: theme
+                    )
+                }
             }
             .frame(height: 22)
-            HStack(alignment: .top, spacing: 12) {
+            if !rows.isEmpty {
+                HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(L10n.text("本周期速率", "Burn rate"))
                         .font(.ui(10)).foregroundStyle(theme.secondary)
@@ -79,9 +82,42 @@ private struct AgentQuotaTile: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .fixedSize(horizontal: false, vertical: true)
+            }
+            if vendor == "Codex", store.codexTodayCostEnabled, let cost = store.codexTodayCost {
+                codexTodayCost(cost)
+            }
         }
         .frame(maxWidth: .infinity, minHeight: 86, alignment: .topLeading)
         .card(theme, padding: EdgeInsets(top: 12, leading: 14, bottom: 12, trailing: 14))
+    }
+
+    /// Today's local Codex token spend at API prices; a subscription is not invoiced by the token.
+    private func codexTodayCost(_ cost: CodexPricing.Estimate) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(L10n.text("今日消耗估算", "Today's est. cost"))
+                .font(.ui(10)).foregroundStyle(theme.secondary)
+            Spacer(minLength: 4)
+            Text(TokenFormat.short(cost.tokens))
+                .font(.tabular(10)).foregroundStyle(theme.secondary)
+            if cost.byModel.isEmpty {
+                Text(L10n.text("暂无价格", "Unpriced"))
+                    .font(.tabular(12, .semibold))
+            } else {
+                Text(MoneyFormat.amount(cost.total, currency: "USD", estimated: true))
+                    .font(.tabular(12, .semibold))
+            }
+            if !cost.unpricedModels.isEmpty {
+                Text(L10n.text("部分未定价", "partially unpriced"))
+                    .font(.ui(9)).foregroundStyle(theme.secondary)
+            }
+        }
+        .help(costHelp(cost))
+    }
+
+    private func costHelp(_ cost: CodexPricing.Estimate) -> String {
+        cost.detailsText + "\n"
+            + L10n.text("按 OpenAI API 定价估算，订阅不实际计费。价格核对于 ", "Estimated at OpenAI API prices; a subscription is not billed per token. Prices checked ")
+            + CodexPricing.checkedOn
     }
 
     private func capHitsDescription(_ insights: UsageInsights) -> String {
